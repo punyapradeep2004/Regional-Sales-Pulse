@@ -29,8 +29,15 @@ st.markdown("""
 }
 
 [data-testid="stHeader"] {
-    background: transparent;
+    background: transparent !important;
     height: 2rem;
+    border-bottom: none !important;
+    box-shadow: none !important;
+}
+
+[data-testid="stAppViewContainer"] {
+    border-top: none !important;
+    box-shadow: none !important;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -632,86 +639,185 @@ with left2:
     chart_layout(fig_segment, 390)
     st.plotly_chart(fig_segment, use_container_width=True)
 
+
 with right2:
-    discount_summary = (
-        filtered.groupby("Discount", as_index=False)
-        .agg(
-            Average_Profit=("Profit", "mean"),
-            Total_Profit=("Profit", "sum"),
-            Records=("Profit", "size")
-        ).sort_values("Discount")
+    # Calculate profit for each Order ID at each discount level
+    order_discount_profit = (
+        filtered.groupby(["Discount", "Order ID"], as_index=False)
+        .agg(Order_Profit=("Profit", "sum"))
     )
-    fig_discount = make_subplots(specs=[[{"secondary_y": True}]])
-    fig_discount.add_trace(go.Bar(
-        x=discount_summary["Discount"] * 100,
-        y=discount_summary["Total_Profit"],
-        name="Total Profit", marker_color="#243B53",
-        customdata=discount_summary[["Records"]].to_numpy(),
-        hovertemplate="Discount: %{x:.0f}%<br>Total Profit: $%{y:,.2f}"
-                      "<br>Records: %{customdata[0]}<extra></extra>"
-    ), secondary_y=False)
-    fig_discount.add_trace(go.Scatter(
-        x=discount_summary["Discount"] * 100,
-        y=discount_summary["Average_Profit"],
-        name="Average Profit", mode="lines+markers",
-        line=dict(color="#2A7F78", width=3), marker=dict(size=8, color="#2A7F78"),
-        hovertemplate="Discount: %{x:.0f}%<br>Average Profit: $%{y:,.2f}<extra></extra>"
-    ), secondary_y=True)
-    fig_discount.add_hline(y=0, line_dash="dash", line_color="#A65D68")
-    fig_discount.update_layout(title="Discount Level vs Average and Total Profit")
-    fig_discount.update_xaxes(title_text="Discount Level (%)")
-    fig_discount.update_yaxes(title_text="Total Profit ($)", secondary_y=False)
-    fig_discount.update_yaxes(title_text="Average Profit per Record ($)", secondary_y=True)
+
+    # Calculate average order profit at each discount level
+    discount_summary = (
+        order_discount_profit.groupby("Discount", as_index=False)
+        .agg(
+            Average_Profit=("Order_Profit", "mean"),
+            Total_Profit=("Order_Profit", "sum"),
+            Orders=("Order ID", "nunique")
+        )
+        .sort_values("Discount")
+    )
+
+    # Create Discount Impact Chart
+    fig_discount = make_subplots(
+        specs=[[{"secondary_y": True}]]
+    )
+
+    fig_discount.add_trace(
+        go.Bar(
+            x=discount_summary["Discount"] * 100,
+            y=discount_summary["Total_Profit"],
+            name="Total Profit",
+            marker_color=PRIMARY,
+            customdata=discount_summary[["Orders"]].to_numpy(),
+            hovertemplate=(
+                "Discount: %{x:.0f}%"
+                "<br>Total Profit: $%{y:,.2f}"
+                "<br>Orders: %{customdata[0]}"
+                "<extra></extra>"
+            )
+        ),
+        secondary_y=False
+    )
+
+    fig_discount.add_trace(
+        go.Scatter(
+            x=discount_summary["Discount"] * 100,
+            y=discount_summary["Average_Profit"],
+            name="Average Profit per Order ID",
+            mode="lines+markers",
+            line=dict(color=GOLD, width=3),
+            marker=dict(size=9, color=GOLD),
+            hovertemplate=(
+                "Discount: %{x:.0f}%"
+                "<br>Average Profit per Order ID: $%{y:,.2f}"
+                "<extra></extra>"
+            )
+        ),
+        secondary_y=True
+    )
+
+    fig_discount.add_hline(
+        y=0,
+        line_dash="dash",
+        line_color=RED
+    )
+
+    fig_discount.update_layout(
+        title="Discount Level vs Average and Total Profit",
+        template="plotly_white",
+        legend=dict(orientation="h", y=1.12),
+        margin=dict(l=15, r=15, t=60, b=35)
+    )
+
+    fig_discount.update_xaxes(
+        title_text="Discount Level (%)"
+    )
+
+    fig_discount.update_yaxes(
+        title_text="Total Profit ($)",
+        secondary_y=False
+    )
+
+    fig_discount.update_yaxes(
+        title_text="Average Profit per Order ID($)",
+        secondary_y=True
+    )
+
     chart_layout(fig_discount, 390)
-    st.plotly_chart(fig_discount, use_container_width=True)
+
+    st.plotly_chart(
+        fig_discount,
+        use_container_width=True
+    )
+
+
 
 # --------------------------- ROW 3: MONTHLY TREND + FORECAST ---------------------------
 st.markdown('<div class="section-title">MONTHLY SALES TREND AND NEXT-MONTH ESTIMATE</div>', unsafe_allow_html=True)
 
+# Use the same monthly grouping and three-model comparison as the notebook.
+# PeriodIndex keeps the evaluation aligned with the notebook calculations.
 monthly_sales = (
-    filtered.set_index("Order Date")["Sales"]
-    .resample("MS").sum().sort_index()
+    filtered.groupby(filtered["Order Date"].dt.to_period("M"))["Sales"]
+    .sum()
+    .sort_index()
 )
 
 forecast_value = None
 forecast_date = None
 forecast_wape = None
-forecast_method = "Seasonal Naive"
+forecast_method = None
+forecast_comparison = pd.DataFrame()
 
-if len(monthly_sales) >= 13:
-    forecast_date = monthly_sales.index[-1] + pd.offsets.MonthBegin(1)
-    reference_date = forecast_date - pd.DateOffset(years=1)
-    if reference_date in monthly_sales.index:
-        forecast_value = float(monthly_sales.loc[reference_date])
+# A fair comparison of all three methods requires enough history for
+# the 6-month moving average and the 12-month seasonal lag.
+if len(monthly_sales) >= 18:
+    forecast_3m = monthly_sales.shift(1).rolling(3).mean()
+    forecast_6m = monthly_sales.shift(1).rolling(6).mean()
+    seasonal_forecast = monthly_sales.shift(12)
 
-    backtest = pd.DataFrame({
-        "Actual": monthly_sales,
-        "Predicted": monthly_sales.shift(12)
+    forecast_comparison = pd.DataFrame({
+        "Actual Sales": monthly_sales,
+        "3-Month MA": forecast_3m,
+        "6-Month MA": forecast_6m,
+        "Seasonal Naive": seasonal_forecast
     }).dropna().tail(12)
-    if not backtest.empty and backtest["Actual"].abs().sum() != 0:
-        forecast_wape = (
-            (backtest["Actual"] - backtest["Predicted"]).abs().sum()
-            / backtest["Actual"].abs().sum()
-        ) * 100
+
+    if not forecast_comparison.empty:
+        forecast_results = []
+        actual = forecast_comparison["Actual Sales"]
+
+        for method in ["3-Month MA", "6-Month MA", "Seasonal Naive"]:
+            predicted = forecast_comparison[method]
+            wape = (
+                np.abs(actual - predicted).sum()
+                / np.abs(actual).sum() * 100
+                if np.abs(actual).sum() != 0 else np.nan
+            )
+            forecast_results.append({"Method": method, "WAPE": wape})
+
+        forecast_results_df = pd.DataFrame(forecast_results).dropna()
+        if not forecast_results_df.empty:
+            best_forecast_row = forecast_results_df.loc[
+                forecast_results_df["WAPE"].idxmin()
+            ]
+            forecast_method = str(best_forecast_row["Method"])
+            forecast_wape = float(best_forecast_row["WAPE"])
+
+            if forecast_method == "3-Month MA":
+                forecast_value = float(monthly_sales.tail(3).mean())
+            elif forecast_method == "6-Month MA":
+                forecast_value = float(monthly_sales.tail(6).mean())
+            else:
+                forecast_value = float(monthly_sales.iloc[-12])
+
+            forecast_date = (
+                monthly_sales.index[-1].to_timestamp()
+                + pd.offsets.MonthBegin(1)
+            )
+
+# Convert monthly PeriodIndex to timestamps for the chart.
+monthly_chart_dates = monthly_sales.index.to_timestamp()
 
 fig_month = go.Figure()
 fig_month.add_trace(go.Scatter(
-    x=monthly_sales.index, y=monthly_sales.values,
+    x=monthly_chart_dates, y=monthly_sales.values,
     name="Actual Monthly Sales", mode="lines+markers",
     line=dict(color=PRIMARY, width=2.5), marker=dict(size=5),
     hovertemplate="%{x|%b %Y}<br>Sales: $%{y:,.2f}<extra></extra>"
 ))
 if forecast_value is not None:
     fig_month.add_trace(go.Scatter(
-        x=[monthly_sales.index[-1], forecast_date],
+        x=[monthly_chart_dates[-1], forecast_date],
         y=[monthly_sales.iloc[-1], forecast_value],
-        name="Next-Month Estimate", mode="lines+markers",
+        name=f"Next-Month Estimate ({forecast_method})", mode="lines+markers",
         line=dict(color=GOLD, width=3, dash="dash"),
         marker=dict(size=9, symbol="diamond"),
         hovertemplate="%{x|%b %Y}<br>Estimated Sales: $%{y:,.2f}<extra></extra>"
     ))
 fig_month.update_layout(
-    title="Monthly Sales Trend with Seasonal Naive Forecast",
+    title="Monthly Sales Trend with Best-Performing Forecast Method",
     xaxis_title="Month", yaxis_title="Sales ($)"
 )
 chart_layout(fig_month, 430)
@@ -719,7 +825,7 @@ st.plotly_chart(fig_month, use_container_width=True)
 
 if forecast_value is not None:
     accuracy_text = (
-        f"Historical back-test WAPE: {forecast_wape:.2f}% (last 12 comparable months)."
+        f"Best method: {forecast_method}. Historical back-test WAPE: {forecast_wape:.2f}% (last 12 comparable months)."
         if forecast_wape is not None else
         "Historical back-test accuracy could not be calculated for this selection."
     )
@@ -742,150 +848,349 @@ if forecast_value is not None:
             unsafe_allow_html=True
         )
     with method_col:
-        st.markdown("**Forecast method: Seasonal Naive**")
+        st.markdown(f"**Best forecast method: {forecast_method}**")
         st.caption(
-            "Uses sales from the same month in the previous year. "
+            "Selected from 3-month moving average, 6-month moving average and Seasonal Naive methods. "
             + accuracy_text
         )
-        st.caption("Forecast is an estimate based on historical seasonal sales patterns, not a guarantee.")
+        st.caption("Forecast is an estimate based on historical sales patterns, not a guarantee.")
 else:
     st.info(
-        "The Seasonal Naive estimate needs at least 13 monthly observations and the matching "
-        "month from the previous year. Widen the selected date range to enable the estimate."
+         "The three-method forecast comparison needs at least 18 monthly observations. "
+        "Widen the selected date range to enable the comparison and next-month estimate."
     )
 
-# --------------------------- BUSINESS INSIGHTS ---------------------------
-# Build all findings from the currently filtered records; no sample values are hard-coded.
-category_summary = (
-    filtered.groupby("Category", as_index=False)
-    .agg(Sales=("Sales", "sum"), Profit=("Profit", "sum"))
-)
-category_summary["Profit Margin"] = np.where(
-    category_summary["Sales"] != 0,
-    category_summary["Profit"] / category_summary["Sales"] * 100,
-    0
-)
 
+# --------------------------- BUSINESS INSIGHTS ---------------------------
+
+# All calculations use the currently filtered dataset.
+# Insights and recommendations update automatically when filters change.
+
+# 1. REGIONAL PERFORMANCE
 region_summary = (
     filtered.groupby("Region", as_index=False)
-    .agg(Sales=("Sales", "sum"), Profit=("Profit", "sum"))
+    .agg(
+        Sales=("Sales", "sum"),
+        Profit=("Profit", "sum")
+    )
 )
+
 region_summary["Profit Margin"] = np.where(
     region_summary["Sales"] != 0,
     region_summary["Profit"] / region_summary["Sales"] * 100,
     0
 )
 
+highest_sales_region = region_summary.loc[
+    region_summary["Sales"].idxmax()
+]
+
+highest_profit_region = region_summary.loc[
+    region_summary["Profit"].idxmax()
+]
+
+lowest_margin_region = region_summary.loc[
+    region_summary["Profit Margin"].idxmin()
+]
+
+
+# 2. ANNUAL SALES TREND
+annual_sales = (
+    filtered.assign(Year=filtered["Order Date"].dt.year)
+    .groupby("Year")["Sales"]
+    .sum()
+    .sort_index()
+)
+
+annual_values_text = "; ".join(
+    f"{int(year)}: ${value:,.2f}"
+    for year, value in annual_sales.items()
+)
+annual_growth_text = []
+if len(annual_sales) >= 2:
+    annual_growth_series = annual_sales.pct_change() * 100
+    annual_growth_text = [
+        f"{int(year)}: {growth:+.2f}%"
+        for year, growth in annual_growth_series.dropna().items()
+    ]
+
+if len(annual_sales) >= 2:
+
+    first_year = annual_sales.index[0]
+    latest_year = annual_sales.index[-1]
+
+    first_year_sales = float(annual_sales.iloc[0])
+    latest_year_sales = float(annual_sales.iloc[-1])
+
+    sales_change = latest_year_sales - first_year_sales
+
+    sales_growth = (
+        sales_change / abs(first_year_sales) * 100
+        if first_year_sales != 0 else None
+    )
+
+else:
+    first_year = None
+    latest_year = None
+    first_year_sales = None
+    latest_year_sales = None
+    sales_change = None
+    sales_growth = None
+
+
+# 3. CATEGORY AND SUB-CATEGORY PROFITABILITY
+category_summary = (
+    filtered.groupby("Category", as_index=False)
+    .agg(
+        Sales=("Sales", "sum"),
+        Profit=("Profit", "sum")
+    )
+)
+
+category_summary["Profit Margin"] = np.where(
+    category_summary["Sales"] != 0,
+    category_summary["Profit"] / category_summary["Sales"] * 100,
+    0
+)
+
+best_profit_category = category_summary.loc[
+    category_summary["Profit"].idxmax()
+]
+
+subcategory_summary = (
+    filtered.groupby("Sub-Category")["Profit"]
+    .sum()
+    .sort_values()
+)
+
+loss_items = subcategory_summary[subcategory_summary < 0]
+
+
+# 4. DISCOUNT IMPACT ON PROFITABILITY
+
+# Correlation between discount and profit using filtered records.
+discount_correlation = filtered["Discount"].corr(
+    filtered["Profit"]
+)
+
+# Calculate profit at order level for each discount level.
+order_discount_data = (
+    filtered.groupby(
+        ["Order ID", "Discount"],
+        as_index=False
+    )
+    .agg(
+        Order_Profit=("Profit", "sum")
+    )
+)
+
+order_discount_summary = (
+    order_discount_data.groupby("Discount", as_index=False)
+    .agg(
+        Average_Order_Profit=("Order_Profit", "mean"),
+        Number_of_Orders=("Order ID", "nunique")
+    )
+    .sort_values("Discount")
+)
+
+negative_discount = order_discount_summary[
+    order_discount_summary["Average_Order_Profit"] < 0
+]
+
+if not negative_discount.empty:
+
+    first_negative_discount = float(
+        negative_discount["Discount"].min() * 100
+    )
+
+    negative_discount_orders = int(
+        order_discount_data[
+            order_discount_data["Discount"]
+            >= negative_discount["Discount"].min()
+        ]["Order ID"].nunique()
+    )
+
+else:
+    first_negative_discount = None
+    negative_discount_orders = 0
+
+
+# 5. CUSTOMER SEGMENT PERFORMANCE
 segment_summary = (
     filtered.groupby("Segment")
-    .agg(Sales=("Sales", "sum"), Profit=("Profit", "sum"))
+    .agg(
+        Sales=("Sales", "sum"),
+        Profit=("Profit", "sum")
+    )
     .sort_values("Sales", ascending=False)
 )
 
-loss_subcats = (
-    filtered.groupby("Sub-Category")["Profit"].sum().sort_values()
-)
-loss_items = loss_subcats[loss_subcats < 0]
+leading_segment = segment_summary.iloc[0]
+leading_segment_name = str(segment_summary.index[0])
 
-negative_discount = discount_summary[discount_summary["Average_Profit"] < 0]
+highest_profit_segment = segment_summary["Profit"].idxmax()
+
+
+# 6. FORECAST PERFORMANCE
+# forecast_wape and forecast_method are calculated earlier
+# in the existing Seasonal Naive forecast section.
 
 insights = []
 
-# 1. Product-level profitability exposure.
+
+# INSIGHT 1: REGIONAL PERFORMANCE
+insights.append(
+    f"<strong>1. Regional Performance:</strong> "
+    f"{escape(str(highest_sales_region['Region']))} recorded the highest sales "
+    f"(${highest_sales_region['Sales']:,.2f}), while "
+    f"{escape(str(highest_profit_region['Region']))} generated the highest profit "
+    f"(${highest_profit_region['Profit']:,.2f}) with a profit margin of "
+    f"{(highest_profit_region['Profit'] / highest_profit_region['Sales'] * 100) if highest_profit_region['Sales'] else 0:.2f}%. "
+    f"{escape(str(lowest_margin_region['Region']))} recorded the lowest "
+    f"profit margin ({lowest_margin_region['Profit Margin']:.2f}%), "
+    f"indicating an area requiring profitability improvement."
+)
+
+
+# INSIGHT 2: YEAR-WISE SALES TREND
+if len(annual_sales) >= 2:
+    growth_details = (
+        "; year-on-year growth: " + ", ".join(annual_growth_text)
+        if annual_growth_text else ""
+    )
+    insights.append(
+        f"<strong>2. Sales Trend:</strong> Annual sales by year were "
+        f"{annual_values_text}{growth_details}. "
+        f"This shows the actual year-by-year sales movement in the selected data."
+    )
+elif len(annual_sales) == 1:
+    insights.append(
+        f"<strong>2. Sales Trend:</strong> Sales for {int(annual_sales.index[0])} "
+        f"were ${annual_sales.iloc[0]:,.2f}. At least two years are required "
+        f"to calculate year-on-year growth."
+    )
+else:
+    insights.append(
+        "<strong>2. Sales Trend:</strong> No annual sales data is available "
+        "for the current selection."
+    )
+
+
+# INSIGHT 3: CATEGORY AND SUB-CATEGORY PROFITABILITY
 if not loss_items.empty:
-    worst_name = str(loss_items.index[0])
-    worst_value = float(loss_items.iloc[0])
-    combined_loss = float(abs(loss_items.sum()))
-    insights.append(
-        f"<strong>Sub-Category Profitability:</strong> "
-        f"{len(loss_items)} of {len(loss_subcats)} sub-categories are loss-making. "
-        f"{worst_name} records the largest loss (${abs(worst_value):,.2f}); "
-        f"combined losses total ${combined_loss:,.2f}."
-    )
-else:
-    insights.append(
-        "<strong>Sub-Category Profitability:</strong> "
-        "All sub-categories generate non-negative total profit under the selected filters."
+
+    worst_subcategories = loss_items.head(3)
+
+    loss_details = ", ".join(
+        f"{escape(str(name))} (${value:,.2f})"
+        for name, value in worst_subcategories.items()
     )
 
-# 2. Regional scale and margin are shown separately to avoid conflating them.
-highest_sales_region = None
-lowest_margin_region = None
-if not region_summary.empty:
-    highest_sales_region = region_summary.loc[region_summary["Sales"].idxmax()]
-    lowest_margin_region = region_summary.loc[region_summary["Profit Margin"].idxmin()]
+    combined_loss = abs(float(loss_items.sum()))
+
     insights.append(
-        f"<strong>Regional Performance:</strong> "
-        f"{highest_sales_region['Region']} contributes the highest sales "
-        f"(${highest_sales_region['Sales']:,.2f}), while "
-        f"{lowest_margin_region['Region']} has the lowest profit margin "
-        f"({lowest_margin_region['Profit Margin']:.2f}%)."
-    )
-else:
-    insights.append(
-        "<strong>Regional Performance:</strong> No regional comparison is available "
-        "for the current filter selection."
+        f"<strong>3. Category and Sub-category Profitability:</strong> "
+        f"{escape(str(best_profit_category['Category']))} generated the highest "
+        f"category profit (${best_profit_category['Profit']:,.2f}). "
+        f"{len(loss_items)} sub-categories recorded negative profit. "
+        f"The largest losses were recorded by {loss_details}. "
+        f"Combined sub-category losses total ${combined_loss:,.2f}."
     )
 
-# 3. Category-level profit and margin.
-best_profit_category = None
-lowest_margin_category = None
-if not category_summary.empty:
-    best_profit_category = category_summary.loc[category_summary["Profit"].idxmax()]
-    lowest_margin_category = category_summary.loc[category_summary["Profit Margin"].idxmin()]
-    insights.append(
-        f"<strong>Category Profitability:</strong> "
-        f"{best_profit_category['Category']} generates the highest total profit "
-        f"(${best_profit_category['Profit']:,.2f}); "
-        f"{lowest_margin_category['Category']} has the lowest margin "
-        f"({lowest_margin_category['Profit Margin']:.2f}%)."
-    )
 else:
+
     insights.append(
-        "<strong>Category Profitability:</strong> No category comparison is available "
-        "for the current filter selection."
+        f"<strong>3. Category and Sub-category Profitability:</strong> "
+        f"{escape(str(best_profit_category['Category']))} generated the highest "
+        f"category profit (${best_profit_category['Profit']:,.2f}). "
+        f"All sub-categories recorded non-negative total profit "
+        f"under the selected filters."
     )
 
-# 4. Discount analysis describes an observed association, not causation.
-if not negative_discount.empty:
-    first_negative_discount = float(negative_discount["Discount"].min() * 100)
-    insights.append(
-        f"<strong>Discount Impact:</strong> Average profit per record is negative "
-        f"at observed discount levels starting at {first_negative_discount:.0f}%. "
-        "This is an observed association and does not establish causation."
-    )
+
+# INSIGHT 4: DISCOUNT IMPACT
+if pd.notna(discount_correlation):
+
+    correlation_text = f"{discount_correlation:.3f}"
+
 else:
-    first_negative_discount = None
+
+    correlation_text = "not available"
+
+
+if first_negative_discount is not None:
+
+    discount_group = order_discount_summary[
+        order_discount_summary["Discount"]
+        == negative_discount["Discount"].min()
+    ].iloc[0]
+
     insights.append(
-        "<strong>Discount Impact:</strong> Average profit per record remains "
-        "non-negative across all discount levels in the current selection."
+        f"<strong>4. Discount Impact on Profitability:</strong> "
+        f"Discount and profit showed a correlation of {correlation_text}. "
+        f"Average order profit remained "
+        f"{'positive' if discount_group['Average_Order_Profit'] >= 0 else 'negative'} "
+        f"at the {first_negative_discount:.0f}% discount level, with an average "
+        f"of ${discount_group['Average_Order_Profit']:,.2f}. "
+        f"This discount group contained "
+        f"{int(discount_group['Number_of_Orders']):,} orders. "
+        f"Average order profit becomes negative at this and other observed "
+        f"discount levels. This indicates an association, not causation."
     )
 
-# 5. Customer segment contribution, with sales and profit both reported.
-if not segment_summary.empty:
-    leading_segment = segment_summary.iloc[0]
-    insights.append(
-        f"<strong>Customer Segment Contribution:</strong> "
-        f"{segment_summary.index[0]} leads sales with "
-        f"${leading_segment['Sales']:,.2f} and contributes "
-        f"${leading_segment['Profit']:,.2f} in profit."
-    )
 else:
+
     insights.append(
-        "<strong>Customer Segment Contribution:</strong> No segment comparison is "
-        "available for the current filter selection."
+        f"<strong>4. Discount Impact on Profitability:</strong> "
+        f"Discount and profit showed a correlation of {correlation_text}. "
+        f"Average order profit remained non-negative across all observed "
+        f"discount levels in the current selection."
     )
+
+
+# INSIGHT 5: CUSTOMER SEGMENT AND FORECAST PERFORMANCE
+if forecast_wape is not None:
+
+    forecast_text = (
+        f"The {escape(str(forecast_method))} method achieved the lowest "
+        f"WAPE among the three tested forecasting methods "
+        f"({forecast_wape:.2f}%)."
+    )
+
+else:
+
+    forecast_text = (
+        "Forecast accuracy could not be compared for the current "
+        "date selection because at least 18 monthly observations "
+        "are required for all three methods."
+    )
+
+insights.append(
+    f"<strong>5. Customer Segment and Forecast Performance:</strong> "
+    f"{escape(leading_segment_name)} was the strongest customer segment "
+    f"in sales, generating ${leading_segment['Sales']:,.2f} in sales "
+    f"and ${leading_segment['Profit']:,.2f} in profit. "
+    f"{escape(str(highest_profit_segment))} generated the highest "
+    f"segment profit. {forecast_text}"
+)
+
+
+# --------------------------- DISPLAY BUSINESS INSIGHTS ---------------------------
 
 insight_title_col, insight_dropdown_col = st.columns(
-    [5.0, 0.45], vertical_alignment="center"
+    [5.0, 0.45],
+    vertical_alignment="center"
 )
+
 with insight_title_col:
     st.markdown(
         '<div class="section-title">BUSINESS INSIGHTS</div>',
         unsafe_allow_html=True
     )
+
 if "show_business_insights" not in st.session_state:
     st.session_state.show_business_insights = True
+
 with insight_dropdown_col:
     if st.button(
         "⌃" if st.session_state.show_business_insights else "⌄",
@@ -893,90 +1198,149 @@ with insight_dropdown_col:
         help="Hide or show the five business insights",
         use_container_width=True,
     ):
-        st.session_state.show_business_insights = not st.session_state.show_business_insights
+        st.session_state.show_business_insights = (
+            not st.session_state.show_business_insights
+        )
 
 if st.session_state.show_business_insights:
-  for insight in insights:
-    st.markdown(
-        f'<div style="background:#FFFFFF;border:1px solid #E1E7EF;'
-        f'border-radius:8px;padding:10px 14px;margin:6px 0;'
-        f'color:#26364A;font-size:0.92rem;line-height:1.5;">'
-        f'{insight}</div>',
-        unsafe_allow_html=True
+
+    st.caption(
+        "The following five insights are based on the currently selected "
+        "date range, region, product category, sub-category, customer segment "
+        "and shipping mode."
     )
+
+    for insight in insights:
+
+        st.markdown(
+            f'<div style="background:#FFFFFF;border:1px solid #E1E7EF;'
+            f'border-radius:8px;padding:10px 14px;margin:6px 0;'
+            f'color:#26364A;font-size:0.92rem;line-height:1.5;">'
+            f'{insight}</div>',
+            unsafe_allow_html=True
+        )
+
 
 # --------------------------- BUSINESS RECOMMENDATIONS ---------------------------
+
 recommendations = []
 
+
+# RECOMMENDATION 1: REGIONAL PROFITABILITY
+recommendations.append(
+    f"<strong>1. Improve {escape(str(lowest_margin_region['Region']))} "
+    f"Region Profitability:</strong> Review discounting strategies, "
+    f"product mix, shipping costs and loss-making products in "
+    f"{escape(str(lowest_margin_region['Region']))}. "
+    f"Its current profit margin is "
+    f"{lowest_margin_region['Profit Margin']:.2f}%. "
+    f"Monitor profit margin alongside sales to improve regional performance."
+)
+
+
+# RECOMMENDATION 2: SALES TRENDS
+if len(annual_sales) >= 2:
+
+    recommendations.append(
+        f"<strong>2. Plan Around Sales Trends:</strong> "
+        f"Use historical sales patterns from {first_year} to {latest_year} "
+        f"to guide inventory planning, staffing and promotional activities. "
+        f"Sales changed by "
+        f"{sales_growth:+.2f}% from {first_year} to {latest_year}. "
+        f"{'Review the reasons for the decline and adjust inventory and promotions.' if sales_growth < 0 else 'Use the growth pattern to guide inventory, staffing and promotional planning.'}"
+    )
+
+else:
+
+    recommendations.append(
+        "<strong>2. Plan Around Sales Trends:</strong> "
+        "Continue monitoring monthly and annual sales patterns to guide "
+        "inventory planning, staffing and promotional activities."
+    )
+
+
+# RECOMMENDATION 3: PRODUCT PROFITABILITY
 if not loss_items.empty:
+
     recommendations.append(
-        f"<strong>Address loss-making products:</strong> Review pricing, product "
-        f"costs, shipping expense and discount policy for {', '.join(map(str, loss_items.index))}. "
-        f"Prioritise {loss_items.index[0]}, which has the largest loss."
-    )
-else:
-    recommendations.append(
-        "<strong>Protect product profitability:</strong> Maintain regular sub-category "
-        "profitability reviews and investigate any movement into negative profit."
+        f"<strong>3. Strengthen Product Profitability:</strong> "
+        f"Maintain the contribution from "
+        f"{escape(str(best_profit_category['Category']))}, which generated "
+        f"${best_profit_category['Profit']:,.2f} in profit, while reviewing "
+        f"pricing, costs and operational strategies for loss-making "
+        f"sub-categories, particularly {', '.join(escape(str(x)) for x in loss_items.index)}."
     )
 
+else:
+
+    recommendations.append(
+        f"<strong>3. Strengthen Product Profitability:</strong> "
+        f"Maintain the strong contribution from "
+        f"{escape(str(best_profit_category['Category']))} and regularly "
+        f"monitor product pricing, costs and profitability."
+    )
+
+
+# RECOMMENDATION 4: DISCOUNT CONTROL
 if first_negative_discount is not None:
+
     recommendations.append(
-        f"<strong>Review high-discount transactions:</strong> Examine discounts of "
-        f"{first_negative_discount:.0f}% and above, and assess their effect on profit "
-        "before expanding promotional offers."
-    )
-else:
-    recommendations.append(
-        "<strong>Measure promotion effectiveness:</strong> Evaluate discounts using "
-        "incremental sales and profit, rather than sales volume alone."
+        f"<strong>4. Implement Discount Control Strategies:</strong> "
+        f"Introduce margin-based discount limits and carefully evaluate "
+        f"discount levels starting at {first_negative_discount:.0f}%, "
+        f"where average order profit becomes negative. "
+        f"Evaluate promotional success based on profitability "
+        f"rather than sales volume alone."
     )
 
-if lowest_margin_category is not None:
-    recommendations.append(
-        f"<strong>Improve category margins:</strong> Review product mix, supplier "
-        f"costs and discount levels in {lowest_margin_category['Category']}, "
-        f"currently the lowest-margin category ({lowest_margin_category['Profit Margin']:.2f}%)."
-    )
 else:
+
     recommendations.append(
-        "<strong>Monitor category economics:</strong> Compare category-level sales, "
-        "profit and margin before changing prices or promotional plans."
+        "<strong>4. Implement Discount Control Strategies:</strong> "
+        "Continue monitoring average order profit across discount levels. "
+        "Evaluate promotional success based on profitability rather "
+        "than sales volume alone."
     )
 
-if lowest_margin_region is not None and highest_sales_region is not None:
+
+# RECOMMENDATION 5: FORECASTING
+if forecast_wape is not None:
+
     recommendations.append(
-        f"<strong>Investigate regional margin gaps:</strong> Examine cost, product "
-        f"and discount mix in {lowest_margin_region['Region']}; compare its practices "
-        f"with the highest-sales region, {highest_sales_region['Region']}."
-    )
-else:
-    recommendations.append(
-        "<strong>Review regional performance:</strong> Track sales and profit margin "
-        "together to identify regions that need operational support."
+        f"<strong>5. Use Forecasting for Better Business Planning:</strong> "
+        f"Use the {escape(str(forecast_method))} method as a reference for sales planning. "
+        f"It achieved the lowest WAPE ({forecast_wape:.2f}%) among the three tested methods "
+        f"for the current filtered period. Compare actual sales with "
+        f"forecasted sales regularly, monitor forecast errors and "
+        f"reassess performance as new monthly data becomes available."
     )
 
-if not segment_summary.empty:
-    recommendations.append(
-        "<strong>Refine segment-level targeting:</strong> Tailor campaigns to each "
-        "customer segment and monitor both sales and profit to ensure growth remains profitable."
-    )
 else:
+
     recommendations.append(
-        "<strong>Strengthen customer analysis:</strong> Track segment-level sales, "
-        "profit and margin to guide targeted campaigns."
+        "<strong>5. Use Forecasting for Better Business Planning:</strong> "
+        "Compare the 3-month moving average, 6-month moving average and "
+        "Seasonal Naive methods when sufficient monthly data is available. "
+        "Monitor forecast errors before using estimates for business decisions."
     )
+
+
+# --------------------------- DISPLAY BUSINESS RECOMMENDATIONS ---------------------------
 
 recommendation_title_col, recommendation_dropdown_col = st.columns(
-    [5.0, 0.45], vertical_alignment="center"
+    [5.0, 0.45],
+    vertical_alignment="center"
 )
+
 with recommendation_title_col:
     st.markdown(
         '<div class="section-title">BUSINESS RECOMMENDATIONS</div>',
         unsafe_allow_html=True
     )
+
 if "show_business_recommendations" not in st.session_state:
     st.session_state.show_business_recommendations = True
+
 with recommendation_dropdown_col:
     if st.button(
         "⌃" if st.session_state.show_business_recommendations else "⌄",
@@ -984,17 +1348,24 @@ with recommendation_dropdown_col:
         help="Hide or show the five business recommendations",
         use_container_width=True,
     ):
-        st.session_state.show_business_recommendations = not st.session_state.show_business_recommendations
+        st.session_state.show_business_recommendations = (
+            not st.session_state.show_business_recommendations
+        )
 
 if st.session_state.show_business_recommendations:
-  for recommendation in recommendations:
-    st.markdown(
-        f'<div style="background:#FFFFFF;border:1px solid #E1E7EF;'
-        f'border-radius:8px;padding:10px 14px;margin:6px 0;'
-        f'color:#26364A;font-size:0.92rem;line-height:1.5;">'
-        f'{recommendation}</div>',
-        unsafe_allow_html=True
-    )
+
+    for recommendation in recommendations:
+
+        st.markdown(
+            f'<div style="background:#FFFFFF;border:1px solid #E1E7EF;'
+            f'border-radius:8px;padding:10px 14px;margin:6px 0;'
+            f'color:#26364A;font-size:0.92rem;line-height:1.5;">'
+            f'{recommendation}</div>',
+            unsafe_allow_html=True
+        )
+
+
+# --------------------------- PERFORMANCE SUMMARY TABLES ---------------------------
 
 # --------------------------- PERFORMANCE SUMMARY TABLES ---------------------------
 st.markdown('<div class="section-title">PERFORMANCE SUMMARY</div>', unsafe_allow_html=True)
@@ -1059,7 +1430,7 @@ with st.expander("View Detailed Discount Analysis", expanded=False):
     discount_table = discount_summary.copy()
     discount_table["Discount Level (%)"] = discount_table["Discount"] * 100
     discount_table = discount_table[
-        ["Discount Level (%)", "Records", "Average_Profit", "Total_Profit"]
+        ["Discount Level (%)", "Orders", "Average_Profit", "Total_Profit"]
     ].rename(columns={
         "Average_Profit": "Average Profit ($)",
         "Total_Profit": "Total Profit ($)"
