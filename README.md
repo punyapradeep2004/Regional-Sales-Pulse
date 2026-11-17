@@ -1,4 +1,9 @@
 # Regional Sales Pulse
+## 🚀 Live Dashboard
+
+Explore the interactive Regional Sales Pulse dashboard:
+
+[Click here to view the Live Dashboard](https://regional-sales-pulse-c9jmfitzfcnksxo7gpedum.streamlit.app/)
 ### Interactive Sales Performance & Profitability Dashboard
 
 A Streamlit-based business intelligence dashboard built to analyze sales performance, profitability, regional trends, product performance, discount impact, and sales forecasting using the Sample Superstore dataset.
